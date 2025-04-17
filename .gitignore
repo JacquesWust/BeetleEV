@@ -1,5 +1,5 @@
 /STM32 Workspace/Beetle_Front/Debug
 /STM32 Workspace/Beetle_Rear/Debug
 *.log
-/STM32 Workspace/.metadata
-/STM32 Workspace/.metadata
+.settings/
+.metadata/
