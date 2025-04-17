@@ -1,0 +1,10 @@
+11:36:05 **** Incremental Build of configuration Debug for project Beetle_Front ****
+make -j12 all 
+arm-none-eabi-size  Beetle_Front.elf 
+   text	   data	    bss	    dec	    hex	filename
+  23968	     40	   2008	  26016	   65a0	Beetle_Front.elf
+Finished building: default.size.stdout
+ 
+
+11:36:06 Build Finished. 0 errors, 0 warnings. (took 282ms)
+

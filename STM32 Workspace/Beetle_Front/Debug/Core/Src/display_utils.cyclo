@@ -1,0 +1,12 @@
+../Core/Src/display_utils.c:7:6:two_ascii_bytes	2
+../Core/Src/display_utils.c:15:6:three_ascii_bytes	4
+../Core/Src/display_utils.c:39:6:write_three	1
+../Core/Src/display_utils.c:45:6:dwin_write	2
+../Core/Src/display_utils.c:63:6:set_state	1
+../Core/Src/display_utils.c:74:6:set_page	1
+../Core/Src/display_utils.c:79:6:write_two	1
+../Core/Src/display_utils.c:86:6:set_voltage	3
+../Core/Src/display_utils.c:111:6:set_current	4
+../Core/Src/display_utils.c:163:6:set_current_bar	5
+../Core/Src/display_utils.c:196:6:set_charge_kw	3
+../Core/Src/display_utils.c:222:6:set_battery	4

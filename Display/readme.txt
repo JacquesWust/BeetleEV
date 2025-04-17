@@ -1,0 +1,2 @@
+dwin_project is the project folder to use with DGUS tool to generate the files for the display.
+DwinFont is the font tool. Very buggy but need to use it to generate the font files for the project for anti-aliased fonts.
