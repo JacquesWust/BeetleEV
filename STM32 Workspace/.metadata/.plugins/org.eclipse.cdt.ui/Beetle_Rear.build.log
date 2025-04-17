@@ -1,4 +1,4 @@
-11:36:06 **** Incremental Build of configuration Debug for project Beetle_Rear ****
+11:53:20 **** Incremental Build of configuration Debug for project Beetle_Rear ****
 make -j12 all 
 arm-none-eabi-size  Beetle_Rear.elf 
    text	   data	    bss	    dec	    hex	filename
@@ -6,5 +6,5 @@ arm-none-eabi-size  Beetle_Rear.elf
 Finished building: default.size.stdout
  
 
-11:36:06 Build Finished. 0 errors, 0 warnings. (took 271ms)
+11:53:20 Build Finished. 0 errors, 0 warnings. (took 269ms)
 
