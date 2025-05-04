@@ -18,11 +18,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +49,7 @@ DMA_HandleTypeDef hdma_adc1;
 DAC_HandleTypeDef hdac1;
 DAC_HandleTypeDef hdac2;
 
+FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
 
 IWDG_HandleTypeDef hiwdg1;
@@ -63,13 +63,13 @@ uint8_t TxData[8];
 uint8_t RxData[8];
 uint32_t TxMailbox;
 
-volatile uint16_t motor_speed_rpm = 9999;
-volatile int16_t inverter_temp = 999;
-volatile int16_t motor_temp = 999;
-
 volatile uint32_t last0x166MsgTime = 0;
-
 volatile uint8_t control_byte_last = 0;
+
+volatile bool sendFastMsg = false;
+volatile bool sendSlowMsg = false;
+volatile uint8_t fastMsgData[8];
+volatile uint8_t slowMsgData[8];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -82,6 +82,7 @@ static void MX_DAC1_Init(void);
 static void MX_DAC2_Init(void);
 static void MX_IWDG1_Init(void);
 static void MX_FDCAN2_Init(void);
+static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -128,6 +129,7 @@ int main(void) {
 	MX_DAC2_Init();
 	MX_IWDG1_Init();
 	MX_FDCAN2_Init();
+	MX_FDCAN1_Init();
 	/* USER CODE BEGIN 2 */
 	HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
 	HAL_DAC_Start(&hdac1, DAC_CHANNEL_2);
@@ -138,9 +140,6 @@ int main(void) {
 	HAL_DAC_SetValue(&hdac2, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
 
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc1_values, 3); // Start ADC in DMA mode
-
-	uint32_t lastToggleTime = 0; // Stores the last toggle time
-	uint32_t lastCanTxTime = 0;
 
 	// Configure global filter to accept all frames in FIFO0
 	HAL_FDCAN_ConfigGlobalFilter(&hfdcan2,
@@ -156,6 +155,24 @@ int main(void) {
 
 	// Enable interrupt-based reception
 	if (HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+			0) != HAL_OK) {
+		Error_Handler();
+	}
+
+	// Configure global filter for FDCAN1
+	HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+	FDCAN_ACCEPT_IN_RX_FIFO0,  // Non-matching standard frames
+			FDCAN_ACCEPT_IN_RX_FIFO0,  // Non-matching extended frames
+			FDCAN_FILTER_REMOTE,       // Remote standard frames
+			FDCAN_FILTER_REMOTE);      // Remote extended frames
+
+	// Start FDCAN1 controller
+	if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
+		Error_Handler();
+	}
+
+	// Enable interrupt-based reception for FDCAN1
+	if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
 			0) != HAL_OK) {
 		Error_Handler();
 	}
@@ -199,9 +216,6 @@ int main(void) {
 
 	/* USER CODE BEGIN BSP */
 
-	/* -- Sample board code to send message over COM1 port ---- */
-	printf("Welcome to STM32 world !\n\r");
-
 	/* USER CODE END BSP */
 
 	/* Infinite loop */
@@ -221,61 +235,45 @@ int main(void) {
 
 		uint32_t currentTime = HAL_GetTick(); // Get system time in ms
 
-		if (currentTime - lastToggleTime >= 500) { // Check if 5 seconds passed
-			printf("ADC Values: %05u %05u %05u\r\n", adc1_values[0],
-					adc1_values[1], adc1_values[2]);
-			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_12);
-			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_11);
-			//HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
-			lastToggleTime = currentTime; // Update last toggle time
+		//		printf("ADC Values: %05u %05u %05u\r\n", adc1_values[0],
+
+		// If no control message received in last 0.5 seconds, reset all outputs so that traction is disabled.
+		if (currentTime + 50 - last0x166MsgTime > 550
+				&& control_byte_last != 0x00) { // sometimes last0x166MsgTime gets updated through an interrupt after currentTime has been set. So then you don't want to subtract them and find them and get a negative number as it will be seen as higher than 500.
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET); // k1-4 traction enable
+			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET); // k1-5 forward
+			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // k1-6 reverse
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET); // k1-7 torque limit
+			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); // k1-18 profile 2
+			HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_RESET); // k1-19 profile 3
+			control_byte_last = 0x00;
+			last0x166MsgTime = currentTime;
 		}
 
-		// Send CAN message every 100ms
-		if (currentTime - lastCanTxTime >= 100) {
-			// Prepare data buffer for CAN message
-			uint8_t data[8] = { 0 }; // Initialize all bytes to zero
-			uint8_t status_byte = 0;
+		if (sendFastMsg) {
+		    // Prepare data buffer for CAN message - DON'T initialize to zero!
+		    uint8_t data[8];
 
-			// Check brake pedal status (NOT depressed if between 450-510)
-			bool brake_depressed =
-					(adc1_values[1] < 450 || adc1_values[1] > 510);
+		    // Copy all bytes from the received message
+		    for (int i = 0; i < 8; i++) {
+		        data[i] = fastMsgData[i];
+		    }
 
-			// Check throttle pedal status (NO pressure if both ADCs in specific ranges)
-			bool throttle_pressure = !(adc1_values[2] >= 1500
-					&& adc1_values[2] <= 1550 && adc1_values[0] >= 2160
-					&& adc1_values[0] <= 2210);
+		    // Check brake pedal status (NOT depressed if between 450-510)
+		    bool brake_depressed = (adc1_values[1] < 450 || adc1_values[1] > 510);
 
-			// Set status bits in byte 0
-			if (brake_depressed)
-				status_byte |= 0x01;  // Bit 0: Brake status
-			if (throttle_pressure)
-				status_byte |= 0x02; // Bit 1: Throttle status
+		    // Check throttle pedal status (NO pressure if both ADCs in specific ranges)
+		    bool throttle_pressure = !(adc1_values[2] >= 1500 && adc1_values[2] <= 1550 &&
+		                             adc1_values[0] >= 2160 && adc1_values[0] <= 2210);
 
-			data[0] = status_byte;
+		    // Get the original value and mask it to 0-7
+		    uint8_t original_value = data[7] & 0x07; // Use 3 bits for 0-7
 
-			// Encode motor speed (0-10000 RPM) in bytes 1-2
-			data[1] = (uint8_t) (motor_speed_rpm & 0xFF);         // LSB
-			data[2] = (uint8_t) ((motor_speed_rpm >> 8) & 0xFF);  // MSB
-
-			// Encode inverter temperature (-50 to 250°C) as signed int16_t in bytes 3-4
-			int16_t inv_temp = (int16_t) inverter_temp;
-			data[3] = (uint8_t) (inv_temp & 0xFF);         // LSB
-			data[4] = (uint8_t) ((inv_temp >> 8) & 0xFF);  // MSB
-
-			// Encode motor temperature (-50 to 250°C) as signed int16_t in bytes 5-6
-			int16_t mot_temp = (int16_t) motor_temp;
-			data[5] = (uint8_t) (mot_temp & 0xFF);         // LSB
-			data[6] = (uint8_t) ((mot_temp >> 8) & 0xFF);  // MSB
-
-			// Byte 7 is already zero (reserved for future use)
-
-			// Print for debugging
-			printf("TX CAN: Brake: %d, Throttle: %d, RPM: %u, Temps: %d/%d\r\n",
-					brake_depressed, throttle_pressure, motor_speed_rpm,
-					inverter_temp, motor_temp);
+		    // Construct the new byte: brake in bit 6, throttle in bit 7, original value in bits 0-2
+		    data[7] = (brake_depressed ? 0x80 : 0) | (throttle_pressure ? 0x40 : 0) | original_value;
 
 			// Set up transmission header
-			TxHeader.Identifier = 0x156;
+			TxHeader.Identifier = 0x154;
 			TxHeader.IdType = FDCAN_STANDARD_ID;
 			TxHeader.TxFrameType = FDCAN_DATA_FRAME;
 			TxHeader.DataLength = FDCAN_DLC_BYTES_8;  // Using all 8 bytes
@@ -292,21 +290,40 @@ int main(void) {
 				printf("CAN TX Error: %d\r\n", status);
 			}
 
-			lastCanTxTime = currentTime;
+			// Reset flag
+			sendFastMsg = false;
 		}
 
-		if (currentTime + 50 - last0x166MsgTime > 550
-				&& control_byte_last != 0x00) { // sometimes last0x166MsgTime gets updated through an interrupt after currentTime has been set. So then you don't want to subtract them and find them and get a negative number as it will be seen as higher than 500.
-			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET); // k1-4 traction enable
-			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET); // k1-5 forward
-			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // k1-6 reverse
-			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET); // k1-7 torque limit
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); // k1-18 profile 2
-			HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_RESET); // k1-19 profile 3
-			control_byte_last = 0x00;
-			last0x166MsgTime = currentTime;
-		}
+		if (sendSlowMsg) {
+			// Prepare data buffer for CAN message
+			uint8_t data[8] = { 0 }; // Initialize all bytes to zero
 
+		    // Copy data from the received message - forward exactly as received
+		    for (int i = 0; i < 4; i++) {
+		        data[i] = slowMsgData[i];
+		    }
+
+			// Set up transmission header
+			TxHeader.Identifier = 0x155;
+			TxHeader.IdType = FDCAN_STANDARD_ID;
+			TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+			TxHeader.DataLength = FDCAN_DLC_BYTES_8;  // Using all 8 bytes
+			TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+			TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
+			TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+			TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+			TxHeader.MessageMarker = 0;
+
+			// Send the message
+			HAL_StatusTypeDef status = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2,
+					&TxHeader, data);
+			if (status != HAL_OK) {
+				printf("CAN TX Error: %d\r\n", status);
+			}
+
+			// Reset flag
+			sendSlowMsg = false;
+		}
 		/* USER CODE END WHILE */
 
 		/* USER CODE BEGIN 3 */
@@ -415,7 +432,7 @@ static void MX_ADC1_Init(void) {
 	hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_6;
 	hadc1.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
 	hadc1.Init.Oversampling.OversamplingStopReset =
-			ADC_REGOVERSAMPLING_CONTINUED_MODE;
+	ADC_REGOVERSAMPLING_CONTINUED_MODE;
 	if (HAL_ADC_Init(&hadc1) != HAL_OK) {
 		Error_Handler();
 	}
@@ -548,6 +565,57 @@ static void MX_DAC2_Init(void) {
 }
 
 /**
+ * @brief FDCAN1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_FDCAN1_Init(void) {
+
+	/* USER CODE BEGIN FDCAN1_Init 0 */
+
+	/* USER CODE END FDCAN1_Init 0 */
+
+	/* USER CODE BEGIN FDCAN1_Init 1 */
+
+	/* USER CODE END FDCAN1_Init 1 */
+	hfdcan1.Instance = FDCAN1;
+	hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+	hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+	hfdcan1.Init.AutoRetransmission = DISABLE;
+	hfdcan1.Init.TransmitPause = DISABLE;
+	hfdcan1.Init.ProtocolException = DISABLE;
+	hfdcan1.Init.NominalPrescaler = 1;
+	hfdcan1.Init.NominalSyncJumpWidth = 4;
+	hfdcan1.Init.NominalTimeSeg1 = 27;
+	hfdcan1.Init.NominalTimeSeg2 = 4;
+	hfdcan1.Init.DataPrescaler = 1;
+	hfdcan1.Init.DataSyncJumpWidth = 14;
+	hfdcan1.Init.DataTimeSeg1 = 17;
+	hfdcan1.Init.DataTimeSeg2 = 14;
+	hfdcan1.Init.MessageRAMOffset = 0;
+	hfdcan1.Init.StdFiltersNbr = 1;
+	hfdcan1.Init.ExtFiltersNbr = 0;
+	hfdcan1.Init.RxFifo0ElmtsNbr = 1;
+	hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+	hfdcan1.Init.RxFifo1ElmtsNbr = 0;
+	hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+	hfdcan1.Init.RxBuffersNbr = 0;
+	hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+	hfdcan1.Init.TxEventsNbr = 0;
+	hfdcan1.Init.TxBuffersNbr = 0;
+	hfdcan1.Init.TxFifoQueueElmtsNbr = 1;
+	hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+	hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+	if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK) {
+		Error_Handler();
+	}
+	/* USER CODE BEGIN FDCAN1_Init 2 */
+
+	/* USER CODE END FDCAN1_Init 2 */
+
+}
+
+/**
  * @brief FDCAN2 Initialization Function
  * @param None
  * @retval None
@@ -672,9 +740,7 @@ static void MX_GPIO_Init(void) {
 	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
 
 	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(GPIOA,
-			GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13,
-			GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10 | GPIO_PIN_13, GPIO_PIN_RESET);
 
 	/*Configure GPIO pin : PE2 */
 	GPIO_InitStruct.Pin = GPIO_PIN_2;
@@ -704,8 +770,8 @@ static void MX_GPIO_Init(void) {
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-	/*Configure GPIO pins : PA10 PA11 PA12 PA13 */
-	GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13;
+	/*Configure GPIO pins : PA10 PA13 */
+	GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_13;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -751,7 +817,21 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
 				last0x166MsgTime = HAL_GetTick();
 
-				printf("Received GPIO control: 0x%02X\r\n", control_byte);
+//				printf("Received GPIO control: 0x%02X\r\n", control_byte);
+			} else if (RxHeader.Identifier
+					== 0x154&& hfdcan->Instance == FDCAN1) { // Fast message received
+			// Fast message received on FDCAN1, copy to buffer for forwarding
+				for (int i = 0; i < 8; i++) {
+					fastMsgData[i] = RxData[i];
+				}
+				sendFastMsg = true;
+			} else if (RxHeader.Identifier
+					== 0x155&& hfdcan->Instance == FDCAN1) { // Slow message received
+			// Slow message received on FDCAN1, copy to buffer for forwarding
+				for (int i = 0; i < 8; i++) {
+					slowMsgData[i] = RxData[i];
+				}
+				sendSlowMsg = true;
 			}
 		}
 	}

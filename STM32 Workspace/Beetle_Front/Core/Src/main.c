@@ -78,10 +78,18 @@ int uart_buf_len;
 volatile bool contactor = false;    // Contactor state based on MCU summary
 volatile bool plugged = false;      // Plugged in status based on MCU summary
 volatile uint8_t SOC = 0;           // State of Charge percentage
-volatile float current = 0.0f;      // Current in Amps
+volatile float current_bms = 0.0f;      // Current in Amps
 volatile uint8_t thmax = 0;         // Maximum thermistor temperature
 volatile float chargekw = 0.0f;     // Charge power in kW
 volatile float voltage = 0.0f;      // Pack voltage in volts
+
+volatile bool underTemp;
+volatile bool overTemp;
+volatile bool LVC;
+volatile bool HVC;
+volatile bool thermistorCensus;
+volatile bool cellCensus;
+volatile bool hardwareFault;
 
 bool inverter_traction_enable = false;   // k1-4 traction enable
 bool inverter_forward = false;           // k1-5 forward
@@ -93,23 +101,45 @@ bool inverter_profile3 = false;          // k1-19 profile 3
 volatile uint32_t lastBMSMsg = 0;
 
 // error display
-#define numErrors 10
+#define numErrors 21
 bool errors[numErrors] = { true, false, false, false, false, false, false,
+false, false, false, false, false, false, false, false, false, false, false,
 false, false, false };
-char errorMsgs[numErrors][18] = { "EV switched on9999", "BMS CAN error",
-		"Rear CAN error", "Inv. CAN error", "Low pack voltage",
-		"High pack voltage", "Battery overtemp.", "Battery undertemp.",
-		"Inverter overtemp.", "Motor overtemp.", };
+uint8_t errorMsgs[numErrors][21] = { "  EV switched on  ", // 0
+		"  Inv. > 75deg C  ", // 1
+		" Motor > 135deg C ", // 2
+		" Bat. below 100V  ", // 3
+		"  Bat. below 20%  ", // 4
+		"  Bat. < 5deg C   ", // 5
+		"  Bat. > 40deg C  ", // 6
+		"  Inv. > 90deg C  ", // 7
+		" Motor > 155deg C ", // 8
+		"  Bat. below 90V  ", // 9
+		"  BMS CAN error   ", // 10
+		" Fr-Rr CAN error  ", // 11
+		"  Inv. CAN error  ", // 12
+		"  BMS LVC < 2.8V  ", // 13
+		" BMS HVC > 4.25V  ", // 14
+		"  Bat. < 0deg C   ", // 15
+		"  Bat. > 55deg C  ", // 16
+		"  Therm. Census   ", // 17
+		"   Cell Census    ", // 18
+		"   BMS HW Fault   ", // 19
+		" Inv. Error #     " }; // 20
 uint32_t lastDispUpdate = 0;
-uint32_t lastDispError = 0;
+uint8_t lastDispError = 0;
 
-// Inverter telemetry data from 0x156 message
-volatile bool inverter_brake_active = false;     // Brake status (true/false)
-volatile bool inverter_throttle_active = false;  // Throttle status (true/false)
-volatile uint16_t inverter_motor_rpm = 0;        // Motor RPM (0-65535)
-volatile int16_t inverter_motor_temp = 0;        // Motor temperature (signed)
-volatile int16_t inverter_inverter_temp = 0;    // Inverter temperature (signed)
-volatile uint32_t last156MsgTime = 0;         // Timestamp for timeout detection
+// Inverter telemetry data from 0x154 message
+volatile double speed = 0;
+volatile double current_inv = 0.0;
+volatile int16_t motor_temp = 0;        // Motor temperature (signed)
+volatile int16_t inverter_temp = 0;     // Inverter temperature (signed)
+volatile uint8_t fault_code = 0;
+volatile uint8_t fault_level = 0;
+volatile bool brake_active_inv = false;     // Brake status (true/false)
+volatile bool throttle_active_inv = false;  // Throttle status (true/false)
+volatile double odometer = 0.0;
+volatile uint32_t last154MsgTime = 0;         // Timestamp for timeout detection
 
 uint32_t lastReversePress = 0;
 uint32_t lastHeaterPress = 0;
@@ -250,19 +280,28 @@ int main(void) {
 		if (currentTime + 50 - lastBMSMsg > 300) {
 			contactor = false;
 			SOC = 0;
-			thmax = 99;
-			errors[1] = true;
+			thmax = 98;
+			voltage = 987.0f;
+			errors[10] = true;
 		} else {
-			errors[1] = false;
+			errors[10] = false;
 		}
 
 		// More than 1 second since last telemetry message from rear STM32, set default values
-		if (currentTime - last156MsgTime > 1000) {
-			inverter_brake_active = true;
-			inverter_throttle_active = false;
-			inverter_motor_rpm = 8888;
-			inverter_motor_temp = 888;
-			inverter_inverter_temp = 888;
+		if (currentTime - last154MsgTime > 100 && currentTime > 1000) {
+			throttle_active_inv = false;
+			speed = 198.0;
+			motor_temp = 987;
+			inverter_temp = 987;
+			odometer = 987654.0;
+			current_inv = 200.0;
+			HAL_GPIO_WritePin(brake_relay_GPIO_Port, brake_relay_Pin,
+					GPIO_PIN_SET);
+			errors[11] = true;
+			errors[12] = true;
+		} else {
+			errors[11] = false;
+			errors[12] = false;
 		}
 
 		if (contactor) {
@@ -273,7 +312,7 @@ int main(void) {
 					GPIO_PIN_RESET);
 		}
 
-		if (inverter_brake_active) {
+		if (brake_active_inv) {
 			HAL_GPIO_WritePin(brake_relay_GPIO_Port, brake_relay_Pin,
 					GPIO_PIN_SET);
 		} else {
@@ -333,7 +372,13 @@ int main(void) {
 		}
 
 		if (main_state == 0) {  // car off mode
-			set_page(3);
+			if (currentTime < 2000) {
+				set_page(3);
+			} else if (!HAL_GPIO_ReadPin(reverse_panel_in_GPIO_Port,
+			reverse_panel_in_Pin) && !HAL_GPIO_ReadPin(heater_in_GPIO_Port,
+			heater_in_Pin)) {
+				set_page(1);
+			}
 			HAL_Delay(50);
 
 			uint32_t current_time = HAL_GetTick();
@@ -346,7 +391,7 @@ int main(void) {
 				HAL_MAX_DELAY);
 
 				if (starter_start == 0 && current_time > 200
-						&& inverter_brake_active) {
+						&& brake_active_inv) {
 					starter_start = current_time;
 					HAL_UART_Transmit(&huart2, (uint8_t*) "CODE RUUn\n", 10,
 					HAL_MAX_DELAY);
@@ -365,7 +410,7 @@ int main(void) {
 					starter_held = false;
 				}
 			}
-			if (inverter_brake_active) {
+			if (brake_active_inv) {
 				set_state(0x2100, 1);
 			} else {
 				set_state(0x2100, 0);
@@ -373,16 +418,54 @@ int main(void) {
 					starter_held = false;
 				}
 			}
-			if (inverter_throttle_active && starter_start > 0) {
+			if (throttle_active_inv && starter_start > 0) {
 				starter_held = false;
 			}
+
 		} else if (main_state == 1) {  // driving mode
 			set_page(1);
 			set_battery(SOC);
 			write_two(0x1550, thmax);
-			write_three(0x1540, inverter_motor_temp);
-			write_three(0x1560, inverter_inverter_temp);
-			set_current_bar(current);
+			write_three(0x1540, motor_temp);
+			write_three(0x1560, inverter_temp);
+			// Convert odometer to integer (multiply by 100 since odometer has 2 decimal places)
+			uint32_t odo_int = (uint32_t) odometer;
+
+			// Cap at 999999 if needed
+			if (odo_int > 999999)
+				odo_int = 999999;
+
+			// Prepare 6 ASCII bytes for display
+			uint8_t odo_bytes[6];
+			odo_bytes[0] = (odo_int / 100000) + '0';       // 100000s place
+			odo_bytes[1] = ((odo_int / 10000) % 10) + '0'; // 10000s place
+			odo_bytes[2] = ((odo_int / 1000) % 10) + '0';  // 1000s place
+			odo_bytes[3] = ((odo_int / 100) % 10) + '0';   // 100s place
+			odo_bytes[4] = ((odo_int / 10) % 10) + '0';    // 10s place
+			odo_bytes[5] = (odo_int % 10) + '0';           // 1s place
+
+			// Send to display
+			dwin_write(0x1570, odo_bytes, 6);
+
+			uint32_t vol_int = (uint32_t) voltage;
+
+			// Cap at 999999 if needed
+			if (vol_int > 999)
+				vol_int = 999;
+
+			uint8_t vol_bytes[5];
+			vol_bytes[0] = ((vol_int / 100) % 10) + '0';   // 100s place
+			vol_bytes[1] = ((vol_int / 10) % 10) + '0';    // 10s place
+			vol_bytes[2] = (vol_int % 10) + '0';           // 1s place
+			vol_bytes[3] = ' '; // 10000s place
+			vol_bytes[4] = 'v';  // 1000s place
+
+			dwin_write(0x1580, vol_bytes, 5);
+
+			set_state(0x1740, (int) speed / 100);         // hundreds digit
+			set_state(0x1750, ((int) speed % 100) / 10);  // tens digit
+			set_state(0x1760, (int) speed % 10);          // ones digit
+			set_current_bar(current_inv);
 
 			if (indicator_state == 0) {
 				set_state(0x1710, 0);
@@ -414,8 +497,8 @@ int main(void) {
 			set_page(2);
 			set_battery(SOC);
 			set_voltage(voltage);
-			set_current(current);
-			set_charge_kw((voltage * current) / 1000.0f);
+			set_current(current_bms);
+			set_charge_kw((voltage * current_bms) / 1000.0f);
 		}
 
 		// always running code:
@@ -460,7 +543,105 @@ int main(void) {
 			set_state(0x1720, 0);
 		}
 
-		if (currentTime - lastDispUpdate >= 2000) {
+		if (currentTime - lastDispUpdate >= 1000) {
+//					"Cell voltage<2.80V", // 11
+//					"Cell voltage>4.25V", // 12
+			// inverter temp
+			if (inverter_temp > 90) {
+				errors[7] = true;
+				errors[1] = false;
+			} else if (inverter_temp > 75) {
+				errors[7] = false;
+				errors[1] = true;
+			} else {
+				errors[7] = false;
+				errors[1] = false;
+			}
+			// motor temp
+			if (motor_temp > 155) {
+				errors[8] = true;
+				errors[2] = false;
+			} else if (motor_temp > 135) {
+				errors[8] = false;
+				errors[2] = true;
+			} else {
+				errors[8] = false;
+				errors[2] = false;
+			}
+			// voltage
+			if (voltage < 90.0f) {
+				errors[9] = true;
+				errors[3] = false;
+			} else if (voltage < 100.0f) {
+				errors[9] = false;
+				errors[3] = true;
+			} else {
+				errors[9] = false;
+				errors[3] = false;
+			}
+			// soc
+			if (SOC < 20) {
+				errors[4] = true;
+			} else {
+				errors[4] = false;
+			}
+			// bat low temp
+			if (underTemp) {
+				errors[15] = true;
+				errors[5] = false;
+			} else if (thmax < 5) {
+				errors[15] = false;
+				errors[5] = true;
+			} else {
+				errors[15] = false;
+				errors[5] = false;
+			}
+			// bat high temp
+			if (overTemp) {
+				errors[16] = true;
+				errors[6] = false;
+			} else if (thmax < 5) {
+				errors[16] = false;
+				errors[6] = true;
+			} else {
+				errors[16] = false;
+				errors[6] = false;
+			}
+			if (LVC) {
+				errors[13] = true;
+			} else {
+				errors[13] = false;
+			}
+			if (HVC) {
+				errors[14] = true;
+			} else {
+				errors[14] = false;
+			}
+			if (thermistorCensus) {
+				errors[17] = true;
+			} else {
+				errors[17] = false;
+			}
+			if (cellCensus) {
+				errors[18] = true;
+			} else {
+				errors[18] = false;
+			}
+			if (hardwareFault) {
+				errors[19] = true;
+			} else {
+				errors[19] = false;
+			}
+			// inverter error
+			if (fault_code > 0) {
+				errors[20] = true;
+				errorMsgs[20][13] = ((fault_code / 100) % 10) + '0'; // 100s place
+				errorMsgs[20][14] = ((fault_code / 10) % 10) + '0'; // 10s place
+				errorMsgs[20][15] = (fault_code % 10) + '0';         // 1s place
+			} else {
+				errors[20] = false;
+			}
+
 			// Find the next active error (where errors[i] is true)
 			uint8_t i = (lastDispError + 1) % numErrors; // Start from the next error index
 
@@ -473,7 +654,19 @@ int main(void) {
 			lastDispError = i;
 
 			// Display the corresponding error message
-			//set_state(0x2900, (uint8_t*)errorMsgs[lastDispError]);
+			uint8_t colour[2];
+			if (lastDispError <= 0) {
+				colour[0] = 0x4D;
+				colour[1] = 0x25;
+			} else if (lastDispError <= 6) {
+				colour[0] = 0xD4;
+				colour[1] = 0xC0;
+			} else {
+				colour[0] = 0xD0;
+				colour[1] = 0x00;
+			}
+			dwin_write(0x7903, colour, sizeof(colour));
+			dwin_write(0x2900, errorMsgs[lastDispError], 18);
 
 			// Update the timestamp for the next cycle
 			lastDispUpdate = currentTime;
@@ -780,22 +973,25 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) { // CAN msg rec
 
 	HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData);
 
-//	char debug_buf[50];
-//	/* Print message ID and length first - fixed warning */
-//	unsigned int stdid = (unsigned int) RxHeader.StdId; // Explicit conversion
-//	int len = sprintf(debug_buf, "RX: ID=0x%03X LEN=%d DATA=", stdid,
-//			(int) RxHeader.DLC);
-//
-//	HAL_UART_Transmit(&huart2, (uint8_t*) debug_buf, len, HAL_MAX_DELAY);
-//
-//	/* Now print each byte as a hex value */
-//	for (int i = 0; i < RxHeader.DLC; i++) {
-//		len = sprintf(debug_buf, "%02X ", RxData[i]);
-//		HAL_UART_Transmit(&huart2, (uint8_t*) debug_buf, len, HAL_MAX_DELAY);
-//	}
-//
-//	/* Add newline at the end */
-//	HAL_UART_Transmit(&huart2, (uint8_t*) "\r\n", 2, HAL_MAX_DELAY);
+	if (RxHeader.StdId == 0x155) {
+		char debug_buf[50];
+		/* Print message ID and length first - fixed warning */
+		unsigned int stdid = (unsigned int) RxHeader.StdId; // Explicit conversion
+		int len = sprintf(debug_buf, "RX: ID=0x%03X LEN=%d DATA=", stdid,
+				(int) RxHeader.DLC);
+
+		HAL_UART_Transmit(&huart2, (uint8_t*) debug_buf, len, HAL_MAX_DELAY);
+
+		/* Now print each byte as a hex value */
+		for (int i = 0; i < RxHeader.DLC; i++) {
+			len = sprintf(debug_buf, "%02X ", RxData[i]);
+			HAL_UART_Transmit(&huart2, (uint8_t*) debug_buf, len,
+			HAL_MAX_DELAY);
+		}
+
+		/* Add newline at the end */
+		HAL_UART_Transmit(&huart2, (uint8_t*) "\r\n", 2, HAL_MAX_DELAY);
+	}
 
 	if (RxHeader.StdId == 0x293) {	// BMS statusmsg
 		lastBMSMsg = HAL_GetTick();
@@ -806,6 +1002,14 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) { // CAN msg rec
 		case 0x01:  // MCU Summary
 			/* Set contactor state based on last two bytes */
 			contactor = (RxData[6] == 0x00 && RxData[7] == 0x00);
+
+			underTemp = (RxData[7] & 0x01) != 0;        // bit 56
+			overTemp = (RxData[7] & 0x02) != 0;         // bit 57
+			LVC = (RxData[7] & 0x04) != 0;              // bit 58
+			HVC = (RxData[7] & 0x08) != 0;              // bit 59
+			thermistorCensus = (RxData[7] & 0x10) != 0; // bit 60
+			cellCensus = (RxData[7] & 0x20) != 0;       // bit 61
+			hardwareFault = (RxData[7] & 0x40) != 0;    // bit 62
 
 			/* Set plugged state based on third last byte */
 			plugged = (RxData[5] != 0x01);
@@ -819,7 +1023,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) { // CAN msg rec
 			voltage = ((RxData[3] << 8) | RxData[2]) * 0.1f; // Voltage in volts
 			/* Extract current */
 			int16_t current_raw = (int16_t) ((RxData[5] << 8) | RxData[4]);
-			current = current_raw * 0.1f;  // Current in amps
+			current_bms = current_raw * 0.1f;  // Current in amps
 			break;
 
 		case 0x03:  // Cell Voltage summary
@@ -836,25 +1040,36 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) { // CAN msg rec
 			SOC = RxData[1];  // SOC as percentage
 			break;
 		}
-	} else if (RxHeader.StdId == 0x156) {  // Rear Stm32 msg
-		// Extract status byte
-		uint8_t status_byte = RxData[0];
-		inverter_brake_active = (status_byte & 0x01) ? true : false; // Bit 0: Brake active
-		inverter_throttle_active = (status_byte & 0x02) ? true : false; // Bit 1: Throttle active
+	} else if (RxHeader.StdId == 0x154) {  // Rear STM32 msg
+		// Extract temperatures (bytes 4 and 5)
+		// Temperature is offset by +40, so we subtract 40 to get actual temperature
+		motor_temp = (int16_t) RxData[4] - 40;      // Motor temp in byte 5
+		inverter_temp = (int16_t) RxData[5] - 40;   // Inverter temp in byte 4
 
-		// Extract motor speed (bytes 1-2)
-		inverter_motor_rpm = (RxData[2] << 8) | RxData[1]; // Little endian format
+		// Extract fault code and fault level
+		fault_code = RxData[6];
+		fault_level = RxData[7] & 0x07;  // Lower 3 bits are fault level
 
-		// Extract inverter temperature (bytes 3-4) - signed int
-		inverter_inverter_temp = (int16_t) ((RxData[4] << 8) | RxData[3]);
+		// Extract brake and throttle status from the highest 2 bits of byte 7
+		brake_active_inv = (RxData[7] & 0x80) ? true : false;     // Bit 7
+		throttle_active_inv = (RxData[7] & 0x40) ? true : false;  // Bit 6
 
-		// Extract motor temperature (bytes 5-6) - signed int
-		inverter_motor_temp = (int16_t) ((RxData[6] << 8) | RxData[5]);
+		// Extract speed (bytes 0-1) - little endian format
+		speed = ((uint16_t) ((RxData[1] << 8) | RxData[0])) / 16.0; // Convert to km/h as double
 
-		// Byte 7 is reserved
+		// Extract current (bytes 2-3) - little endian format, signed value
+		int16_t current_raw = (int16_t) ((RxData[3] << 8) | RxData[2]);
+		current_inv = current_raw / 10.0;  // Convert to Amps
 
 		// Update timestamp for timeout detection
-		last156MsgTime = HAL_GetTick();
+		last154MsgTime = HAL_GetTick();
+	} else if (RxHeader.StdId == 0x155) {  // Slow message with odometer data
+		// Extract odometer (bytes 0-3, little endian format with 2 decimal places)
+		uint32_t odo_raw = ((uint32_t) RxData[0]) | ((uint32_t) RxData[1] << 8)
+				| ((uint32_t) RxData[2] << 16) | ((uint32_t) RxData[3] << 24);
+
+		// Convert to kilometers with 2 decimal places
+		odometer = odo_raw / 100.0;
 	}
 }
 

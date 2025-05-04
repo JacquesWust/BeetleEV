@@ -4,14 +4,6 @@
 extern UART_HandleTypeDef huart1;  // Use the UART1 handle from main.c
 extern bool uart_dma_busy;
 
-void two_ascii_bytes(uint8_t value, uint8_t *ascii_bytes) {
-	if (value > 99) {
-		value = 99;
-	}
-	ascii_bytes[0] = (value / 10) + '0'; // Get the tens digit and convert to ASCII
-	ascii_bytes[1] = (value % 10) + '0'; // Get the ones digit and convert to ASCII
-}
-
 void three_ascii_bytes(int16_t value, uint8_t *ascii_bytes) {
 	// Check if value is negative
 	if (value < 0) {
@@ -78,7 +70,11 @@ void set_page(uint8_t page) {
 
 void write_two(uint16_t vp, uint8_t value) {
 	uint8_t ascii_bytes[2];
-	two_ascii_bytes(value, ascii_bytes);
+	if (value > 99) {
+		value = 99;
+	}
+	ascii_bytes[0] = (value / 10) + '0'; // Get the tens digit and convert to ASCII
+	ascii_bytes[1] = (value % 10) + '0'; // Get the ones digit and convert to ASCII
 	dwin_write(vp, ascii_bytes, sizeof(ascii_bytes));
 }
 
@@ -152,36 +148,24 @@ void set_current(float current) {
 }
 
 /* Configurable current range parameters */
-#define MIN_CURRENT -300.0f  // Current that maps to maximum bar value (200)
-#define MAX_CURRENT 100.0f   // Current that maps to minimum bar value (0)
-#define ZERO_POINT 0.0f      // Current that maps to middle bar value (100)
+#define MIN_CURRENT -200.0  // Current that maps to maximum bar value (200)
+#define MAX_CURRENT 400.0   // Current that maps to minimum bar value (0)
 
-/**
- * Maps current to bar display value:
- * - MIN_CURRENT maps to 200
- * - ZERO_POINT maps to 100
- * - MAX_CURRENT maps to 0
- */
-void set_current_bar(float current) {
+void set_current_bar(double current) {
 	uint8_t bar_value;
 
 	/* Implement piecewise linear mapping */
 	if (current <= MIN_CURRENT) {
-		/* Below minimum threshold, max bar value */
-		bar_value = 200;
-	} else if (current < ZERO_POINT) {
-		/* Negative range: Map [MIN_CURRENT, ZERO_POINT] to [200, 100] */
-		float range = ZERO_POINT - MIN_CURRENT;
-		float position = ZERO_POINT - current;
-		bar_value = 100 + (uint8_t) (100.0f * position / range);
-	} else if (current <= MAX_CURRENT) {
-		/* Positive range: Map [ZERO_POINT, MAX_CURRENT] to [100, 0] */
-		float range = MAX_CURRENT - ZERO_POINT;
-		float position = current - ZERO_POINT;
-		bar_value = 100 - (uint8_t) (100.0f * position / range);
-	} else {
-		/* Above maximum threshold, min bar value */
 		bar_value = 0;
+	} else if (current < 0) {
+		bar_value = 100 - (uint8_t) (100.0f * current / MIN_CURRENT);
+	} else if (current <= MAX_CURRENT) {
+		if (current < 7) {
+			current = 0;
+		}
+		bar_value = 100 + (uint8_t) (100.0f * current / MAX_CURRENT);
+	} else {
+		bar_value = 200;
 	}
 
 	/* Ensure we stay within valid range 0-200 */

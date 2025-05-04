@@ -16,7 +16,7 @@ void write_three(uint16_t vp, int16_t value);
 void set_voltage(float voltage);
 void set_current(float current);
 void set_charge_kw(float charge_kw);
-void set_current_bar(float current);
+void set_current_bar(double current);
 
 
 
