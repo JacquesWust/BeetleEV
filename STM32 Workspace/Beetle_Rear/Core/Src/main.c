@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,6 +63,8 @@ FDCAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8];
 uint8_t RxData[8];
 uint32_t TxMailbox;
+
+bool malfunction = false;
 
 volatile uint32_t last0x166MsgTime = 0;
 volatile uint8_t control_byte_last = 0;
@@ -224,6 +227,13 @@ int main(void) {
 		HAL_IWDG_Refresh(&hiwdg1);
 
 		// throttle 1
+		int expected_adc2 = (int)(-0.83803 * adc1_values[0] + 3337.7 + 0.5);
+
+		uint32_t currentTime = HAL_GetTick();
+		if (currentTime > 1000 && (adc1_values[1] < 400 || adc1_values[2] < 1200 || adc1_values[2] > 2600 || adc1_values[0] < 1200 || adc1_values[0] > 2600 || abs(expected_adc2-adc1_values[2]) > 600)) {
+			malfunction = true;
+		}
+
 		uint16_t throttle1 = (adc1_values[2] - 1350) * 4095 / (2400 - 1350);
 		HAL_DAC_SetValue(&hdac2, DAC_CHANNEL_1, DAC_ALIGN_12B_R, throttle1);
 		// throttle 2
@@ -233,13 +243,12 @@ int main(void) {
 		HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R,
 				adc1_values[1]);
 
-		uint32_t currentTime = HAL_GetTick(); // Get system time in ms
 
-		//		printf("ADC Values: %05u %05u %05u\r\n", adc1_values[0],
+		//printf("ADC Values: %05u %05u %05u %05u\r\n", adc1_values[0], adc1_values[1], adc1_values[2], expected_adc2);
 
 		// If no control message received in last 0.5 seconds, reset all outputs so that traction is disabled.
-		if (currentTime + 50 - last0x166MsgTime > 550
-				&& control_byte_last != 0x00) { // sometimes last0x166MsgTime gets updated through an interrupt after currentTime has been set. So then you don't want to subtract them and find them and get a negative number as it will be seen as higher than 500.
+		if ((currentTime + 50 - last0x166MsgTime > 550
+				&& control_byte_last != 0x00) || malfunction) { // sometimes last0x166MsgTime gets updated through an interrupt after currentTime has been set. So then you don't want to subtract them and find them and get a negative number as it will be seen as higher than 500.
 			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET); // k1-4 traction enable
 			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET); // k1-5 forward
 			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // k1-6 reverse
@@ -259,7 +268,7 @@ int main(void) {
 		        data[i] = fastMsgData[i];
 		    }
 
-		    // Check brake pedal status (NOT depressed if between 450-510)
+		    // Check brake pedal status (NOT depressed if between 450-490)
 		    bool brake_depressed = (adc1_values[1] < 450 || adc1_values[1] > 510);
 
 		    // Check throttle pedal status (NO pressure if both ADCs in specific ranges)
@@ -792,7 +801,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 				// Message for GPIO control
 				uint8_t control_byte = RxData[0];
 
-				if (control_byte != control_byte_last) {
+				if (control_byte != control_byte_last && !malfunction) {
 					// Update GPIO pins based on control byte (in k1-pin order)
 					HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12,
 							(control_byte & 0x01) ?

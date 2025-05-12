@@ -91,6 +91,8 @@ volatile bool thermistorCensus;
 volatile bool cellCensus;
 volatile bool hardwareFault;
 
+bool malfunction = false;
+
 bool inverter_traction_enable = false;   // k1-4 traction enable
 bool inverter_forward = false;           // k1-5 forward
 bool inverter_reverse = false;           // k1-6 reverse
@@ -283,6 +285,7 @@ int main(void)
 		// if we haven't received recent BMS update via CAN, set error and turn off contactor
 		if (currentTime + 50 - lastBMSMsg > 300) {
 			contactor = false;
+			inverter_traction_enable = false;
 			SOC = 0;
 			thmax = 98;
 			voltage = 987.0f;
@@ -292,7 +295,7 @@ int main(void)
 		}
 
 		// More than 1 second since last telemetry message from rear STM32, set default values
-		if (currentTime - last154MsgTime > 100 && currentTime > 1000) {
+		if (currentTime - last154MsgTime > 100 && currentTime > 1700) {
 			throttle_active_inv = false;
 			speed = 198.0;
 			motor_temp = 987;
@@ -301,6 +304,8 @@ int main(void)
 			current_inv = 200.0;
 			HAL_GPIO_WritePin(brake_relay_GPIO_Port, brake_relay_Pin,
 					GPIO_PIN_SET);
+			malfunction = true;
+			inverter_traction_enable = false;
 			errors[11] = true;
 			errors[12] = true;
 		} else {
@@ -308,12 +313,13 @@ int main(void)
 			errors[12] = false;
 		}
 
-		if (contactor) {
+		if (contactor && !malfunction) {
 			HAL_GPIO_WritePin(contactor_relay_GPIO_Port, contactor_relay_Pin,
 					GPIO_PIN_SET);
 		} else {
 			HAL_GPIO_WritePin(contactor_relay_GPIO_Port, contactor_relay_Pin,
 					GPIO_PIN_RESET);
+			inverter_traction_enable = false;
 		}
 
 		if (brake_active_inv) {
@@ -326,6 +332,15 @@ int main(void)
 					GPIO_PIN_RESET);
 			}
 		}
+
+		if (inverter_temp > 40 && currentTime > 1000) {
+			HAL_GPIO_WritePin(pump_relay_GPIO_Port, pump_relay_Pin,
+					GPIO_PIN_SET);
+		} else if (inverter_temp < 35){
+			HAL_GPIO_WritePin(pump_relay_GPIO_Port, pump_relay_Pin,
+					GPIO_PIN_RESET);
+		}
+
 
 		bool heater_button = !HAL_GPIO_ReadPin(heater_in_GPIO_Port,
 		heater_in_Pin);
@@ -379,7 +394,7 @@ int main(void)
 		}
 
 		if (main_state == 0) {  // car off mode
-			if (currentTime < 2000) {
+			if (currentTime < 2000 && currentTime > 1300) {
 				set_page(3);
 			} else if (!HAL_GPIO_ReadPin(reverse_panel_in_GPIO_Port,
 			reverse_panel_in_Pin) && !HAL_GPIO_ReadPin(heater_in_GPIO_Port,
@@ -399,7 +414,7 @@ int main(void)
 						&& brake_active_inv) {
 					starter_start = current_time;
 				} else if (starter_start
-						> 0&& current_time - starter_start > 700 && starter_held == true) {
+						> 0 && current_time - starter_start > 700 && starter_held == true) {
 					set_current_bar(0.0);
 					main_state = 1;
 					inverter_traction_enable = true;
